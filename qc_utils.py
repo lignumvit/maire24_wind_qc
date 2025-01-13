@@ -11,7 +11,7 @@ from bokeh.io import push_notebook, show, output_notebook
 from bokeh.layouts import row
 from bokeh.layouts import gridplot
 from bokeh.plotting import figure, show
-from bokeh.models import Title, CustomJS, Select, TextInput, Button, LinearAxis, Range1d, FuncTickFormatter, HoverTool, ColumnDataSource
+from bokeh.models import Title, CustomJS, Select, TextInput, Button, LinearAxis, Range1d, HoverTool, ColumnDataSource
 from bokeh.models.formatters import DatetimeTickFormatter
 from bokeh.models.tickers import DatetimeTicker
 from bokeh.palettes import Category10
@@ -20,10 +20,11 @@ from scipy import signal
 
 # Thresholds for determining what data can be considered in AoA coef determination (e.g. straight-and-level).
 # Used by mask_straight_and_level.
-#max_vspd = 0.3 # could use 1 m/s
-max_vspd = 8 # m/s
+max_vspd = 1 # could use 1 m/s
+#max_vspd = 8 # m/s
 max_roll = 1 # deg
 min_tas = 100 # m/s
+min_alt = 40500 # pressure altitude in ft
 # min vspd used to isolate climb situations
 min_vspd = 2.5 
 
@@ -35,16 +36,16 @@ Cpd = 7.0/2.0*Rd
 Cvd = 5.0/2.0*Rd
 
 read_vars = ['ADIFR', 'BDIFR', 'ADIFRTEMP', 'BDIFRTEMP', # adifr, bdifr
-             'QCF', 'QCFR', 'QCR', 'QC_A', 'QC_A2', 'QCFRC',      # raw, dynamic pressures (q)
+             'QCF', 'QCFC', 'QCR', 'QCRC', 'QC_A', 'QC_A2',      # raw, dynamic pressures (q)
              'GGLAT','GGLON','GGNSAT','GGQUAL','GGSPD','GGTRK', # GPS variables
-             'PSFD', 'PSFRD', 'PSXC', # static pressures
+             'PSF', 'PSFC', 'PSFF', 'PSFFC', 'PSXC', # static pressures
              'VEW', 'VNS', 'VSPD', 'GGVEW', 'GGVNS', 'GGVSPD', 'VEWC', 'VNSC', # aircraft velocities, raw and blended
              'UI', 'UIC', 'VI', 'VIC', 'WI', 'WIC', # winds, both uncorrected and GPS-corrected
              'PALTF', 'PALT', 'GGALT', 'ALT', # altitudes
-             'TASF', 'TASFR', 'TASR', 'TAS_A', 'TAS_A2', 'MACHX', # speeds
+             'TASF', 'TASR', 'TAS_A', 'TAS_A2', 'MACHX', # speeds
              'PITCH', 'ROLL', 'THDG', # attitude
              'AKRD', 'SSLIP', # flow angles
-             'RHUM', 'RICE', 'ATX', 'BNORMA', 'BLATA', 'BLONGA', 'WDC',
+             'RHUM', 'ATX', 'BNORMA', 'BLATA', 'BLONGA', 'WDC',
             ]
 
 def hms_to_sfm(hms_str: str):
@@ -87,14 +88,16 @@ def mask_in_times(df, beg_time=-1, end_time=-1):
     return mask
 
 
-def mask_straight_and_level(df):
+def mask_cal_data(df):
     roll = df['ROLL']
     vspd = df['GGVSPD']
-    tas = df['TASFR']
+    tas = df['TASF']
+    paltf = df['PALTF']
     mask = np.abs(roll) < max_roll
     mask = np.logical_and(mask, np.abs(vspd) < max_vspd)
     mask = np.logical_and(mask, tas > min_tas)
-    nan_check_vars = ['QCF', 'PSFD', 'ADIFR', 'GGVSPD', 'TASFR', 'PITCH', 'AKRD']
+    mask = np.logical_and(mask, paltf > min_alt)
+    nan_check_vars = ['QCF', 'PSF', 'ADIFR', 'GGVSPD', 'TASF', 'PITCH', 'AKRD']
     for var in nan_check_vars:
         mask = np.logical_and(mask, np.isfinite(df[var]))
     return mask.to_numpy()
@@ -158,7 +161,7 @@ def simple_fit_func(ratio, a, b):
 def open_nc(data_dir):
     # get file names
     # only partial data on return ff's, so those are excluded. Only included the first three
-    ffnames = sorted(["CAESARff01.nc", "CAESARff02.nc", "CAESARff03.nc", "CAESARff04.nc", "CAESARff05.nc", "CAESARff06.nc"])
+    ffnames = sorted([fname for fname in os.listdir(data_dir) if fnmatch(fname, "*ff??.nc")])
     tfnames = sorted([fname for fname in os.listdir(data_dir) if fnmatch(fname, "*tf??.nc")])
     rfnames = sorted([fname for fname in os.listdir(data_dir) if fnmatch(fname, "*rf??.nc")])
     allfnames = ffnames + tfnames + rfnames
@@ -185,28 +188,28 @@ def open_nc(data_dir):
     # try to get global attributes from the netcdf file if they are present
     # determine preliminary or final status
     try:
-        proc_status = nc_dict['ff01'].getncattr('WARNING')
+        proc_status = nc_dict['rf01'].getncattr('WARNING')
         print(proc_status)
     except:
         proc_status = 'final'
     
     # determine the NIDAS version
     try:
-        nidas = nc_dict['ff01'].getncattr('NIDASrevision')
+        nidas = nc_dict['rf01'].getncattr('NIDASrevision')
         print('NIDAS version: ' + nidas)
     except Exception as e:
         print(e)
     
     # determine the NIMBUS version
     try:
-        nimbus = nc_dict['ff01'].getncattr('RepositoryRevision')
+        nimbus = nc_dict['rf01'].getncattr('RepositoryRevision')
         print('NIMBUS version: ' + nimbus)
     except Exception as e:
         print(e)
     
     # determine the processing date and time
     try:
-        proc_date = nc_dict['ff01'].getncattr('date_created')
+        proc_date = nc_dict['rf01'].getncattr('date_created')
         print('Processing Date & Time: ' + proc_date)
     except Exception as e:
         print(e)
@@ -291,7 +294,8 @@ def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
 
 # function definition for creating generic timeseries plot
 def format_ticks(plot):
-    plot.xaxis.formatter=DatetimeTickFormatter(days =['%h:%m'], hours="%h:%m", minutes="%h:%m",hourmin = ['%h:%m'])             
+    #plot.xaxis.formatter=DatetimeTickFormatter(days =['%h:%m'], hours="%h:%m", minutes="%h:%m",hourmin = ['%h:%m'])             
+    plot.xaxis.formatter=DatetimeTickFormatter(days ='%h:%m', hours="%h:%m", minutes="%h:%m",hourmin = '%h:%m')
 
 def plot_time_series_aoa(df: pd.DataFrame, mask=None, title=''):
     if mask is None:
@@ -438,8 +442,8 @@ class aoa_fit:
         self.leg = leg
         self.prev_coefs_three = [4.7532, 9.7908, 6.0781]
         self.prev_coefs_two = [5.661,14.826]
-        self.varnamemap = {'datetime': 'dt', 'QCF': 'q', 'PSFD': 'ps', 'ADIFR': 'adifr', 'BDIFR': 'bdifr', 'SSLIP': 'sslip',
-                           'GGVSPD': 'vspd', 'TASFR': 'tas', 'PITCH': 'pitch', 'AKRD': 'akrd', 'PALTF': 'paltf', 'THDG': 'hdg',
+        self.varnamemap = {'datetime': 'dt', 'QCF': 'q', 'PSF': 'ps', 'ADIFR': 'adifr', 'BDIFR': 'bdifr', 'SSLIP': 'sslip',
+                           'GGVSPD': 'vspd', 'TASF': 'tas', 'PITCH': 'pitch', 'AKRD': 'akrd', 'PALTF': 'paltf', 'THDG': 'hdg',
                            'GGALT': 'alt', 'ATX': 'tc', 'PSXC': 'p', 'UIC': 'u', 'VIC': 'v', 'WIC': 'w', 'GGVEW': 'up', 'GGVNS': 'vp', 'GGTRK': 'trk'}
         self.r2d = 180./math.pi
         # get basic vars needed
@@ -452,6 +456,20 @@ class aoa_fit:
         self.tk = self.tc + 273.15
         self.p = self.p*100 # hPa to Pa
         self.rho = self.p/Rd/self.tk
+
+        # compute tas acceleration
+        tas_np = df['TASF'].to_numpy()
+        deltat = np.zeros(np.shape(tas_np))
+        deltat[0] = (df['datetime'][1] - df['datetime'][0]).total_seconds()
+        for i in range(1,len(deltat)-1):
+            deltat[i] = (df['datetime'][i+1] - df['datetime'][i-1]).total_seconds()
+        deltat[len(deltat)-1] = (df['datetime'][len(deltat)-1] - df['datetime'][len(deltat)-2]).total_seconds()
+
+        dtas = np.zeros(np.shape(tas_np))
+        dtas[0] = tas_np[1] - tas_np[0]
+        dtas[1:len(dtas)-1] = tas_np[2:] - tas_np[0:len(dtas)-2]
+        dtas[-1] = tas_np[-1] - tas_np[-2]
+        self.tas_acc = dtas[mask]/deltat[mask]
         
         # now, calculate reference AoS
         # do filtering
@@ -780,26 +798,37 @@ def plot_maneuv_for_aoa(aoa_obj: aoa_fit):
     colors = itertools.cycle(Category10[8])
     p2 = figure(width=width, height=height, x_range=p1.x_range)
     p2.add_layout(Title(text="Diff. Pres. [hPa]", align="center"), "left")
-    p2.line(aoa_obj.df['datetime'], aoa_obj.df['BDIFR'], color=next(colors), legend_label='BDIFR')
-    p2.line(aoa_obj.df['datetime'], aoa_obj.df['ADIFR'], color=next(colors), legend_label='ADIFR')
+    #p2.line(aoa_obj.df['datetime'], aoa_obj.df['BDIFR']/aoa_obj.df['QCF'], color=next(colors), legend_label='BDIFR/Q')
+    #p2.line(aoa_obj.df['datetime'], aoa_obj.df['ADIFR']/aoa_obj.df['QCF'], color=next(colors), legend_label='ADIFR/Q')
+    p2.line(aoa_obj.dt, aoa_obj.adifr/aoa_obj.q , color=next(colors), legend_label='ADIFR/Q')
+    #p2.line(aoa_obj.dt, aoa_obj.bdifr/aoa_obj.q , color=next(colors), legend_label='BDIFR/Q')
     p2.add_tools(ht)
     format_ticks(p2)
 
     colors = itertools.cycle(Category10[8])
     p3 = figure(width=width, height=height, x_range=p1.x_range)
     p3.add_layout(Title(text="TAS [m/s]", align="center"), "left")
-    p3.line(aoa_obj.df['datetime'], aoa_obj.df['TASFR'], color=next(colors))
+    p3.line(aoa_obj.df['datetime'], aoa_obj.df['TASF'], color=next(colors))
     p3.add_tools(ht)
     format_ticks(p3)
   
+    #colors = itertools.cycle(Category10[8])
+    #p7 = figure(width=width, height=int(height), x_range=p1.x_range)
+    #p7.add_layout(Title(text="Diff. Pres. [hPa]", align="center"), "left")
+    #p7.line(aoa_obj.df['datetime'], aoa_obj.df['QCR'], color=next(colors), legend_label='QCR')
+    #p7.line(aoa_obj.df['datetime'], aoa_obj.df['QCF'], color=next(colors), legend_label='QCF')
+    #p7.legend.location = 'top_left'
+    #p7.add_tools(ht)
+    #format_ticks(p7)
+
     colors = itertools.cycle(Category10[8])
     p7 = figure(width=width, height=int(height), x_range=p1.x_range)
-    p7.add_layout(Title(text="Diff. Pres. [hPa]", align="center"), "left")
-    p7.line(aoa_obj.df['datetime'], aoa_obj.df['QCR'], color=next(colors), legend_label='QCR')
-    p7.line(aoa_obj.df['datetime'], aoa_obj.df['QCF'], color=next(colors), legend_label='QCF')
+    p7.add_layout(Title(text="TAS Acc. [m/s/s]", align="center"), "left")
+    p7.line(aoa_obj.dt, aoa_obj.tas_acc, color=next(colors))
     p7.legend.location = 'top_left'
     p7.add_tools(ht)
     format_ticks(p7)
+
 
     colors = itertools.cycle(Category10[8])
     p8 = figure(width=width, height=int(height), x_range=p1.x_range)
@@ -1017,7 +1046,7 @@ def plot_aoa_scatter(aoa_obj: aoa_fit, coefs: list[float], title='', aoa_range=(
     p1.add_layout(Title(text="ADIFR/Q", align="center"), "below")
     p1.dot(aoa_obj.adifr/aoa_obj.q, aoa_obj.aoa_ref, color=next(colors), size=10)
     p1.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd_two, color=next(colors), legend_label='1-predictor fit', width=2)
-    p1.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd, color=next(colors), legend_label='ARISTO fit')
+    p1.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd, color=next(colors), legend_label='Defaults')
     p1.legend.location = 'top_left'
 
     colors = itertools.cycle(Category10[8])
@@ -1037,7 +1066,7 @@ def plot_aoa_scatter(aoa_obj: aoa_fit, coefs: list[float], title='', aoa_range=(
     p3.add_layout(Title(text="AoA Ref [deg]", align="center"), "left")
     p3.add_layout(Title(text="BDIFR/Q", align="center"), "below")
     p3.dot(aoa_obj.bdifr/aoa_obj.q, aoa_obj.aos_ref, color=next(colors), size=10)
-    p3.line(aoa_obj.bdifr/aoa_obj.q, aoa_obj.sslip, color=next(colors), legend_label='ARISTO fit', width=2)
+    p3.line(aoa_obj.bdifr/aoa_obj.q, aoa_obj.sslip, color=next(colors), legend_label='Defaults', width=2)
     p3.legend.location = 'top_left'
 
     colors = itertools.cycle(Category10[8])
@@ -1066,7 +1095,7 @@ def plot_aoa_scatter_for_cal(aoa_obj: aoa_fit, title='', aoa_range=(0,6.5), aos_
     p1.add_layout(Title(text="ADIFR/Q", align="center"), "below")
     p1.dot(aoa_obj.adifr/aoa_obj.q, aoa_obj.aoa_ref, color=next(colors), size=10)
     p1.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd_two, color=next(colors), legend_label='1-predictor fit', width=2)
-    p1.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd, color=next(colors), legend_label='ARISTO fit')
+    p1.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd, color=next(colors), legend_label='Defaults')
     p1.legend.location = 'top_left'
 
     colors = itertools.cycle(Category10[8])
@@ -1092,7 +1121,7 @@ def plot_aos_scatter(aos_obj: aos_fit, title='', aos_range=(-7,7)):
     p1.add_layout(Title(text="BDIFR/Q", align="center"), "below")
     p1.dot(aos_obj.bdifr/aos_obj.q, aos_obj.aos_ref, color=next(colors), size=10)
     p1.line(aos_obj.bdifr/aos_obj.q, aos_obj.sslip_fit, color=next(colors), legend_label='CAESAR fit', width=2)
-    p1.line(aos_obj.bdifr/aos_obj.q, aos_obj.sslip, color=next(colors), legend_label='ARISTO fit')
+    p1.line(aos_obj.bdifr/aos_obj.q, aos_obj.sslip, color=next(colors), legend_label='Defaults')
     p1.legend.location = 'top_left'
 
     colors = itertools.cycle(Category10[8])
@@ -1303,7 +1332,8 @@ def plot_all_scatters(aoa_objs: list[aoa_fit]):
         p.add_layout(Title(text="ADIFR/Q", align="center"), "below")
         p.dot(aoa_obj.adifr/aoa_obj.q, aoa_obj.aoa_ref, color=next(colors), size=10)
         p.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd_two, color=next(colors), legend_label='1-predictor fit', width=2)
-        p.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd, color=next(colors), legend_label='ARISTO fit')
+        p.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd_three, color=next(colors), legend_label='2-predictor fit', width=2)
+        p.line(aoa_obj.adifr/aoa_obj.q, aoa_obj.akrd, color=next(colors), legend_label='Default fit')
         p.legend.location = 'top_left'
         if len(row_list) < plt_per_row:
             row_list.append(p)
