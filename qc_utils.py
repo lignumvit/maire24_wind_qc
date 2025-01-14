@@ -4,19 +4,17 @@ import copy
 import os
 import netCDF4
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import timedelta
 from fnmatch import fnmatch
 import numpy as np
-from bokeh.io import push_notebook, show, output_notebook
-from bokeh.layouts import row
 from bokeh.layouts import gridplot
 from bokeh.plotting import figure, show
-from bokeh.models import Title, CustomJS, Select, TextInput, Button, LinearAxis, Range1d, HoverTool, ColumnDataSource
+from bokeh.models import Title, HoverTool
 from bokeh.models.formatters import DatetimeTickFormatter
-from bokeh.models.tickers import DatetimeTicker
 from bokeh.palettes import Category10
 import itertools
 from scipy import signal
+import wind_utils
 
 # Thresholds for determining what data can be considered in AoA coef determination (e.g. straight-and-level).
 # Used by mask_straight_and_level.
@@ -45,7 +43,7 @@ read_vars = ['ADIFR', 'BDIFR', 'ADIFRTEMP', 'BDIFRTEMP', # adifr, bdifr
              'TASF', 'TASR', 'TAS_A', 'TAS_A2', 'MACHX', # speeds
              'PITCH', 'ROLL', 'THDG', # attitude
              'AKRD', 'SSLIP', # flow angles
-             'RHUM', 'ATX', 'BNORMA', 'BLATA', 'BLONGA', 'WDC',
+             'RHUM', 'ATX', 'BNORMA', 'BLATA', 'BLONGA', 'WDC', 'MACHF'
             ]
 
 def hms_to_sfm(hms_str: str):
@@ -132,9 +130,9 @@ def mask_flying(df):
     return mask.to_numpy()
 
 
-def calc_mach(q: np.array, ps: np.array):
-    # a function to calculate mach given a dynamic (q) and static (ps) pressure
-    return (5*(((ps + q)/ps)**(Rd/Cpd) - 1))**0.5
+#def calc_mach_dry(q: np.array, ps: np.array):
+#    # a function to calculate mach given a dynamic (q) and static (ps) pressure
+#    return (5*(((ps + q)/ps)**(Rd/Cpd) - 1))**0.5
 
 def fit_func_four(x: np.array, a: float, b: float, c: float, d: float):
 
@@ -145,13 +143,13 @@ def fit_func_four(x: np.array, a: float, b: float, c: float, d: float):
     rho = x[2,:]
     return a + rho*b + ratio*(c + d*mach)
 
-def fit_func(x: np.array, a: float, b: float, c: float):
-
-    # x: a 2 by N array, where x[0,:] = ADIFR/QCF and x[1,:] = MACH
-    # a, b, c: fit coefficients
-    ratio = x[0,:]
-    mach = x[1,:]
-    return a + ratio*(b + c*mach)
+#def fit_func(x: np.array, a: float, b: float, c: float):
+#
+#    # x: a 2 by N array, where x[0,:] = ADIFR/QCF and x[1,:] = MACH
+#    # a, b, c: fit coefficients
+#    ratio = x[0,:]
+#    mach_dry = x[1,:]
+#    return a + ratio*(b + c*mach_dry)
 
 def simple_fit_func(ratio, a, b):
     # ratio: an N element array from ADIFR/QCF or BDIFR/QCF
@@ -294,7 +292,6 @@ def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
 
 # function definition for creating generic timeseries plot
 def format_ticks(plot):
-    #plot.xaxis.formatter=DatetimeTickFormatter(days =['%h:%m'], hours="%h:%m", minutes="%h:%m",hourmin = ['%h:%m'])             
     plot.xaxis.formatter=DatetimeTickFormatter(days ='%h:%m', hours="%h:%m", minutes="%h:%m",hourmin = '%h:%m')
 
 def plot_time_series_aoa(df: pd.DataFrame, mask=None, title=''):
@@ -450,7 +447,7 @@ class aoa_fit:
 
         for key, val in self.varnamemap.items():
             setattr(self, val, df[key][mask].to_numpy())
-        self.mach = calc_mach(self.q, self.ps)
+        self.mach = wind_utils.calc_mach_dry(self.q, self.ps)
         self.aoa_corr = -np.arcsin(self.vspd/self.tas)*self.r2d
         self.aoa_ref = self.pitch + self.aoa_corr
         self.tk = self.tc + 273.15
@@ -516,7 +513,7 @@ class aoa_fit:
         self.converged_four = not ierr_four == 0
 
         x = np.array([ratio[finite_mask], self.mach[finite_mask]])
-        self.coefs_three, pcov_three, odict_three, msg_three, ierr_three = curve_fit(fit_func, x, self.aoa_ref[finite_mask], 
+        self.coefs_three, pcov_three, odict_three, msg_three, ierr_three = curve_fit(wind_utils.calc_akrd, x, self.aoa_ref[finite_mask], 
                                                                                      p0=self.prev_coefs_three, full_output=True, method='trf')
         self.cond_no_three = np.linalg.cond(pcov_three)
         self.converged_three = not ierr_three == 0
@@ -529,7 +526,7 @@ class aoa_fit:
 
         # now with fitting done, predict aoa_ref
         self.akrd_four = fit_func_four(np.array([ratio, self.mach, self.rho]), *self.coefs_four)
-        self.akrd_three = fit_func(np.array([ratio, self.mach]), *self.coefs_three)
+        self.akrd_three = wind_utils.calc_akrd(np.array([ratio, self.mach]), *self.coefs_three)
         self.akrd_two = simple_fit_func(ratio, *self.coefs_two)
 
     def append(self, obj):
@@ -577,7 +574,7 @@ class aos_fit:
 
         for key, val in self.varnamemap.items():
             setattr(self, val, df[key][mask].to_numpy())
-        self.mach = calc_mach(self.q, self.ps)
+        self.mach = wind_utils.calc_mach_dry(self.q, self.ps)
         self.tk = self.tc + 273.15
         self.p = self.p*100 # hPa to Pa
         self.rho = self.p/Rd/self.tk
@@ -672,7 +669,7 @@ def plot_aoa_obj(aoa_obj: aoa_fit, coefs: list[float]):
     ht = HoverTool(tooltips=[('time', '@x{%H:%M:%S}'), ('y', '@y')], formatters={'@x': 'datetime'})
 
     x = np.array([aoa_obj.adifr/aoa_obj.q, aoa_obj.mach])
-    cal_aoa = fit_func(x, *coefs)
+    cal_aoa = wind_utils.calc_akrd(x, *coefs)
 
     # generate the altitude, heading and gps quality plots
     height = 150
@@ -1035,7 +1032,7 @@ def plot_aos_validation(prev: aos_fit, curr: aos_fit):
 def plot_aoa_scatter(aoa_obj: aoa_fit, coefs: list[float], title='', aoa_range=(0,6.5), aos_range=(-6.5,6.5)):
 
     x = np.array([aoa_obj.adifr/aoa_obj.q,aoa_obj.mach])
-    aoa_cal = fit_func(x, *coefs)
+    aoa_cal = wind_utils.calc_akrd(x, *coefs)
 
     # generate the altitude, heading and gps quality plots
     height = 400
@@ -1059,7 +1056,7 @@ def plot_aoa_scatter(aoa_obj: aoa_fit, coefs: list[float], title='', aoa_range=(
     #p2.dot(aoa_obj.aoa_ref, aoa_obj.akrd, color=next(colors), size=10, legend_label='ARISTO', fill_alpha=0.5, line_alpha=0.5)
     p2.line(aoa_range, aoa_range, color='black', legend_label='1-to-1')
     p2.legend.location = 'top_left'
-    #fit_three = fit_func(np.array([ratio, self.mach]), *self.coefs_three)
+    #fit_three = wind_utils.calc_akrd(np.array([ratio, self.mach]), *self.coefs_three)
 
     colors = itertools.cycle(Category10[8])
     p3 = figure(width=width, height=height, title=title+' Reference AoS vs BDIFR/Q')
@@ -1076,7 +1073,7 @@ def plot_aoa_scatter(aoa_obj: aoa_fit, coefs: list[float], title='', aoa_range=(
     p4.dot(aoa_obj.aos_ref, aoa_obj.sslip, color=next(colors), size=10)
     p4.line(aos_range, aos_range, color='black', legend_label='1-to-1')
     p4.legend.location = 'top_left'
-    #fit_three = fit_func(np.array([ratio, self.mach]), *self.coefs_three)
+    #fit_three = wind_utils.calc_akrd(np.array([ratio, self.mach]), *self.coefs_three)
 
    
     #p1.line(aoa_obj.akrd_three, aoa_obj.aoa_ref, color=next(colors))
@@ -1163,7 +1160,7 @@ def plot_scatter_before_after(aoa_obj_before: aoa_fit, aoa_obj_after: aoa_fit, t
     #p2.dot(aoa_obj.aoa_ref, aoa_obj.akrd_three, color=next(colors), size=10, legend_label='2-predictors')
     #p2.line(aoa_range, aoa_range, color='black', legend_label='1-to-1')
     #p2.legend.location = 'top_left'
-    #fit_three = fit_func(np.array([ratio, self.mach]), *self.coefs_three)
+    #fit_three = wind_utils.calc_akrd(np.array([ratio, self.mach]), *self.coefs_three)
 
     
     #p1.line(aoa_obj.akrd_three, aoa_obj.aoa_ref, color=next(colors))
@@ -1360,7 +1357,7 @@ def plot_all_scatters_vertspd(up: list[aoa_fit], dn: list[aoa_fit], coefs):
 
         combined_obj = up_obj.append(dn_obj)
         x = np.array([combined_obj.adifr/combined_obj.q, combined_obj.mach])
-        aoa_best = fit_func(x, *coefs)
+        aoa_best = wind_utils.calc_akrd(x, *coefs)
 
         colors = itertools.cycle(Category10[8])
         p = figure(width=width, height=height, title=f"{up_obj.flight}, AOARef vs Ratio")
@@ -1388,7 +1385,7 @@ def plot_aoa_adifr_vertspd(up: aoa_fit, dn: aoa_fit, coefs):
 
     combined_obj = up.append(dn)
     x = np.array([combined_obj.adifr/combined_obj.q, combined_obj.mach])
-    aoa_best = fit_func(x, *coefs)
+    aoa_best = wind_utils.calc_akrd(x, *coefs)
 
     # generate the altitude, heading and gps quality plots
     height = 600
@@ -1413,8 +1410,8 @@ def plot_aoa_aoa_vertspd(up: aoa_fit, dn: aoa_fit, coefs: list[float], title='',
     width = 600
     x_up = np.array([up.adifr/up.q, up.mach])
     x_dn = np.array([dn.adifr/dn.q, dn.mach])
-    aoa_up = fit_func(x_up, *coefs)
-    aoa_dn = fit_func(x_dn, *coefs)
+    aoa_up = wind_utils.calc_akrd(x_up, *coefs)
+    aoa_dn = wind_utils.calc_akrd(x_dn, *coefs)
     colors = itertools.cycle(Category10[8])
     p = figure(width=width, height=height, title=title+'AOARef vs Ratio', x_range=aoa_range, y_range=aoa_range)
     p.add_layout(Title(text="AoA Gust [deg]", align="center"), "left")
@@ -1471,9 +1468,9 @@ def plot_aoa_aoa_final(aoa_obj: aoa_fit, coefs_mans, coefs_flights, coefs_final,
     width = 500
     alpha = 0.1
     x = np.array([aoa_obj.adifr/aoa_obj.q, aoa_obj.mach])
-    aoa_mans = fit_func(x, *coefs_mans)
-    aoa_flights = fit_func(x, *coefs_flights)
-    aoa_final = fit_func(x, *coefs_final)
+    aoa_mans = wind_utils.calc_akrd(x, *coefs_mans)
+    aoa_flights = wind_utils.calc_akrd(x, *coefs_flights)
+    aoa_final = wind_utils.calc_akrd(x, *coefs_final)
 
     colors = itertools.cycle(Category10[8])
     p1 = figure(width=width, height=height, title='Coefficients only from Maneuvers', x_range=aoa_range, y_range=aoa_range)
@@ -1681,7 +1678,7 @@ def plot_all_aoa_obj(aoa_objs: list[aoa_fit], coefs: list[float]):
     for aoa_obj in aoa_objs:
 
         x = np.array([aoa_obj.adifr/aoa_obj.q, aoa_obj.mach])
-        cal_aoa = fit_func(x, *coefs)
+        cal_aoa = wind_utils.calc_akrd(x, *coefs)
         # generate the altitude, heading and gps quality plots
         colors = itertools.cycle(Category10[8])
         p = figure(width=width, height=int(height), title=aoa_obj.flight)
@@ -1697,5 +1694,4 @@ def plot_all_aoa_obj(aoa_objs: list[aoa_fit], coefs: list[float]):
 
     p = gridplot(figs)
     show(p)
-
 
